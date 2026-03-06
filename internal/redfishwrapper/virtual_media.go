@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 
 	"github.com/stmcginnis/gofish/schemas"
 )
@@ -16,27 +17,39 @@ import (
 // System resource (/redfish/v1/Systems/{SystemId}/VirtualMedia) rather than
 // the Manager resource (/redfish/v1/Managers/{ManagerId}/VirtualMedia).
 // Both locations are valid per the Redfish specification.
+//
+// The returned slice is sorted by ODataID for deterministic slot ordering.
+// gofish fetches collection members concurrently, returning them in arbitrary
+// order. Without sorting, the wrong slot may be selected on multi-slot BMCs
+// (e.g., Dell iDRAC10 VirtualMedia/2 before VirtualMedia/1).
 func (c *Client) getVirtualMedia(ctx context.Context) ([]*schemas.VirtualMedia, error) {
+	var vm []*schemas.VirtualMedia
+
 	// Try Manager path first (standard Redfish location).
-	m, err := c.Manager(ctx)
-	if err == nil {
-		vm, err := m.VirtualMedia()
-		if err == nil && len(vm) > 0 {
-			return vm, nil
+	if m, err := c.Manager(ctx); err == nil {
+		if v, err := m.VirtualMedia(); err == nil && len(v) > 0 {
+			vm = v
 		}
 	}
 
 	// Fallback to System path (Dell iDRAC and other implementations that
 	// expose VirtualMedia under ComputerSystem per Redfish spec v1.12.0+).
-	sys, err := c.System()
-	if err == nil {
-		vm, err := sys.VirtualMedia()
-		if err == nil && len(vm) > 0 {
-			return vm, nil
+	if len(vm) == 0 {
+		if sys, err := c.System(); err == nil {
+			if v, err := sys.VirtualMedia(); err == nil && len(v) > 0 {
+				vm = v
+			}
 		}
 	}
 
-	return nil, errors.New("no virtual media found at Manager or System resource paths")
+	if len(vm) == 0 {
+		return nil, errors.New("no virtual media found at Manager or System resource paths")
+	}
+
+	// Sort once at the single exit point for deterministic slot ordering.
+	sort.Slice(vm, func(i, j int) bool { return vm[i].ODataID < vm[j].ODataID })
+
+	return vm, nil
 }
 
 // Set the virtual media attached to the system, or just eject everything if mediaURL is empty.

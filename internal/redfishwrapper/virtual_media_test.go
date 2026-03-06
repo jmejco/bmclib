@@ -176,6 +176,48 @@ func TestInsertedVirtualMedia_DellSystemPath(t *testing.T) {
 	assert.Empty(t, inserted)
 }
 
+func TestGetVirtualMedia_SortedByODataID(t *testing.T) {
+	// Verify that getVirtualMedia returns slots sorted by ODataID regardless of
+	// the order the Redfish collection lists them. The Dell fixture intentionally
+	// lists VirtualMedia/2 before VirtualMedia/1 in Members (mirroring the real
+	// Dell R470 iDRAC10 behaviour where concurrent goroutine fetches return
+	// VirtualMedia/2 first). Without the sort fix, bmclib would pick slot 2
+	// ("Virtual Network File 2") instead of slot 1 ("Virtual Optical Drive"),
+	// causing CD boot to fail.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/redfish/v1/", endpointFunc(t, "dell/serviceroot.json"))
+	mux.HandleFunc("/redfish/v1/Managers", endpointFunc(t, "dell/managers.json"))
+	mux.HandleFunc("/redfish/v1/Managers/iDRAC.Embedded.1", endpointFunc(t, "dell/manager.idrac.embedded.1.json"))
+	mux.HandleFunc("/redfish/v1/Systems", endpointFunc(t, "dell/systems.json"))
+	mux.HandleFunc("/redfish/v1/Systems/System.Embedded.1", endpointFunc(t, "dell/system.embedded.1.virtualmedia.json"))
+	mux.HandleFunc("/redfish/v1/Systems/System.Embedded.1/VirtualMedia", endpointFunc(t, "dell/virtualmedia_collection.json"))
+	mux.HandleFunc("/redfish/v1/Systems/System.Embedded.1/VirtualMedia/1", endpointFunc(t, "dell/virtualmedia_1.json"))
+	mux.HandleFunc("/redfish/v1/Systems/System.Embedded.1/VirtualMedia/2", endpointFunc(t, "dell/virtualmedia_2.json"))
+
+	server := httptest.NewTLSServer(mux)
+	defer server.Close()
+
+	parsedURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	client := NewClient(parsedURL.Hostname(), parsedURL.Port(), "", "", WithBasicAuthEnabled(true))
+
+	err = client.Open(ctx)
+	require.NoError(t, err)
+	defer client.Close(ctx)
+
+	vm, err := client.getVirtualMedia(ctx)
+	require.NoError(t, err)
+	require.Len(t, vm, 2)
+
+	// VirtualMedia/1 must come before VirtualMedia/2 regardless of collection order.
+	// The fixture lists /2 before /1 in Members (the real-world race condition),
+	// so this assertion would fail without the sort.Slice fix.
+	assert.Contains(t, vm[0].ODataID, "VirtualMedia/1", "first slot should be VirtualMedia/1 (Virtual Optical Drive)")
+	assert.Contains(t, vm[1].ODataID, "VirtualMedia/2", "second slot should be VirtualMedia/2")
+}
+
 func TestSetVirtualMedia_InvalidMediaType(t *testing.T) {
 	// Test that invalid media type returns an error before any Redfish calls
 	mux := http.NewServeMux()
